@@ -1,3 +1,4 @@
+import { deepResearch } from '@/lib/deep-research'
 import { useState, useRef, useEffect, useMemo, useCallback, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ChevronRight, CircleAlert, FileText, Globe, X } from 'lucide-react'
@@ -272,6 +273,13 @@ export default function PlaygroundPage() {
   const [webSearch, setWebSearch] = useState<boolean>(
     () => localStorage.getItem('playground.webSearch') === '1',
   )
+  const [deepSearch, setDeepSearch] = useState(() => localStorage.getItem('playground.deepSearch') === '1')
+  const budgets = [1, 2, 3, 5, 8, 10, 15, 20, 0]
+  const [searchBudget, setSearchBudget] = useState(() => {
+    const stored = Number(localStorage.getItem('playground.searchBudget') ?? 8)
+    return budgets.includes(stored) ? stored : 8
+  })
+  const [researchRound, setResearchRound] = useState<number | null>(null)
   const updateWebSearch = (enabled: boolean) => {
     setWebSearch(enabled)
     localStorage.setItem('playground.webSearch', enabled ? '1' : '0')
@@ -664,7 +672,7 @@ export default function PlaygroundPage() {
   // Read a fusion SSE stream, updating the assistant message in place as panel
   // answers + the judge arrive (additive `_fusion` frames) and the final answer
   // streams as content deltas.
-  const streamFusion = async (stream: ReadableStream<Uint8Array>, baseMessages: ChatMessage[], start: number) => {
+  const streamFusion = async (stream: ReadableStream<Uint8Array>, baseMessages: ChatMessage[], start: number, webSearch?: WebSearchMeta) => {
     const reader = stream.getReader()
     const dec = new TextDecoder()
     let buf = ''
@@ -678,7 +686,7 @@ export default function PlaygroundPage() {
       const next: ChatMessage[] = [...baseMessages, {
         role: 'assistant',
         content: finalContent,
-        meta: { latency: Date.now() - start, fusionPanel: [...panel], fusionJudge: judge, fusionStreaming: streaming },
+        meta: { latency: Date.now() - start, fusionPanel: [...panel], fusionJudge: judge, fusionStreaming: streaming, webSearch },
       }]
       setMessages(next)
       return next
@@ -851,16 +859,36 @@ export default function PlaygroundPage() {
       if (keyData?.apiKey) headers['Authorization'] = `Bearer ${keyData.apiKey}`
       const base = import.meta.env.BASE_URL.replace(/\/$/, '')
 
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+
       // Web search first, when it is on and there is a question to look up. A
       // failed search is reported and the question is answered without it.
       let searchContext: string | null = null
       let webSearchMeta: WebSearchMeta | undefined
-      if (webSearchOn && text) {
+      if (webSearchOn && deepSearch && userMsg.content.trim()) {
+        const start = Date.now()
+        setResearchRound(0)
+        const research = await deepResearch({
+          base, headers, signal: controller.signal, model: selectedModel,
+          objective: userMsg.content,
+          history: messages.slice(-6).map(m => m.role + ': ' + m.content).join('\n').slice(-6000),
+          limit: searchBudget, progress: setResearchRound,
+        })
+        searchContext = research.context
+        webSearchMeta = {
+          engine: research.providers.map(searchProviderName).join(', '),
+          latency: Date.now() - start, sources: research.sources,
+        }
+        setResearchRound(null)
+      } else if (webSearchOn && text) {
         const searchStart = Date.now()
         try {
           const res = await fetch(`${base}/v1/search`, {
             method: 'POST',
             headers,
+            signal: controller.signal,
             body: JSON.stringify({ query: text, max_results: 5 }),
           })
           if (!res.ok) {
@@ -877,6 +905,7 @@ export default function PlaygroundPage() {
             }
           }
         } catch (err) {
+          if (controller.signal.aborted) throw err
           toast.error(t('search.playgroundFailed', { reason: err instanceof Error ? err.message : String(err) }))
         }
       }
@@ -899,10 +928,6 @@ export default function PlaygroundPage() {
       // arrive, every other model so the answer appears token by token instead
       // of after a silent minute.
       body.stream = true
-
-      abortRef.current?.abort()
-      const controller = new AbortController()
-      abortRef.current = controller
 
       const start = Date.now()
       const res = await fetch(`${base}/v1/chat/completions`, {
@@ -931,7 +956,7 @@ export default function PlaygroundPage() {
       }
 
       if (isFusion && res.body) {
-        await streamFusion(res.body, newMessages, start)
+        await streamFusion(res.body, newMessages, start, webSearchMeta)
         return
       }
 
@@ -986,6 +1011,7 @@ export default function PlaygroundPage() {
       setMessages(failed)
       await persistConversation(failed)
     } finally {
+      setResearchRound(null)
       setLoading(false)
       setTimeout(() => inputRef.current?.focus(), 0)
     }
@@ -1271,6 +1297,30 @@ export default function PlaygroundPage() {
               e.target.value = ''
             }}
           />
+          {webSearchOn && (
+            <div className="mb-2 flex flex-wrap items-center gap-3 text-xs">
+              <select aria-label={t('search.mode')} disabled={loading} value={deepSearch ? 'deep' : 'quick'}
+                onChange={e => {
+                  setDeepSearch(e.target.value === 'deep')
+                  localStorage.setItem('playground.deepSearch', e.target.value === 'deep' ? '1' : '0')
+                }}>
+                <option value="quick">{t('search.quick')}</option>
+                <option value="deep">{t('search.deep')}</option>
+              </select>
+              {deepSearch && <label>{t('search.budget')}{' '}
+                <select disabled={loading} value={searchBudget} onChange={e => {
+                  setSearchBudget(Number(e.target.value))
+                  localStorage.setItem('playground.searchBudget', e.target.value)
+                }}>
+                  {budgets.map(n => <option key={n} value={n}>{n || t('search.unlimited')}</option>)}
+                </select>
+              </label>}
+            </div>
+          )}
+          {researchRound !== null && <div className="mb-2 flex items-center gap-3 text-xs">
+            <span role="status">{researchRound ? t('search.round', { count: researchRound }) : t('search.planning')}</span>
+            <button type="button" className="underline" onClick={() => abortRef.current?.abort()}>{t('common.cancel')}</button>
+          </div>}
           <LiquidComposer
             inputRef={inputRef}
             value={input}
