@@ -111,6 +111,40 @@ function SearchEngineCard({
   )
 }
 
+type SearchLimit = { limit: number; maximum: number }
+
+function SearchLimitSetting() {
+  const { t } = useI18n()
+  const queryClient = useQueryClient()
+  const queryKey = ['settings', 'search-limit']
+  const path = '/api/settings/search-limit'
+  const setting = useQuery({ queryKey, queryFn: () => apiFetch<SearchLimit>(path) })
+  const save = useMutation({
+    mutationFn: (limit: number) => apiFetch<SearchLimit>(path, {
+      method: 'PUT', body: JSON.stringify({ limit }),
+    }),
+    onSuccess: data => queryClient.setQueryData(queryKey, data),
+  })
+
+  return (
+    <div className="rounded-3xl border bg-card p-5">
+      <label className="flex items-center justify-between gap-3 text-sm font-medium">
+        {t('search.limitLabel')}
+        <select className="rounded border bg-background px-2 py-1"
+          value={setting.data?.limit ?? ''} disabled={!setting.data || save.isPending}
+          onChange={event => save.mutate(Number(event.target.value))}>
+          {!setting.data && <option value="">–</option>}
+          {Array.from({ length: setting.data?.maximum ?? 0 }, (_, i) => (
+            <option key={i + 1} value={i + 1}>{i + 1}</option>
+          ))}
+        </select>
+      </label>
+      <p className="mt-1 text-xs text-muted-foreground">{t('search.limitHint')}</p>
+      {(setting.error || save.error) && <p role="alert">{(setting.error || save.error)?.message}</p>}
+    </div>
+  )
+}
+
 // Models → Search: the catalog's search engines in failover order, with the
 // same month-to-date usage card the media tabs use. Rows sync from the signed
 // catalog like every other modality; the toggles and "Make default" are the
@@ -153,6 +187,8 @@ export function SearchEnginesView() {
           <code className="rounded bg-muted px-1 py-0.5 font-mono text-[11px]">POST /v1/search</code>{' '}
           {t('search.agentsHint')}
         </p>
+
+        <SearchLimitSetting />
 
         {engines.length > 0 && (
           <UsageSummaryCard

@@ -1333,6 +1333,8 @@
     "tab": "Search",
     "pageDesc": "Web search engines your apps and agents can call. Engines are tried in priority order; when one runs out of free credits the next one takes over.",
     "endpointHint": "Search via",
+    "limitLabel": "Máximo padrão de pesquisas por requisição",
+    "limitHint": "Usado quando o agente não informa um limite de pesquisas na requisição.",
     "agentsHint": "— also answers web searches from Claude Code and Codex. New engines reach Premium first and Free 30 days later.",
     "empty": "No search engines yet. They sync from the catalog.",
     "creditsPerSearchOne": "1 credit / search",

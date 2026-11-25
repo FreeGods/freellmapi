@@ -39,7 +39,25 @@ import {
   setSystemDateMode,
 } from '../lib/system-date.js';
 
+import { getDefaultSearchLimit, MAX_SEARCHES_CEILING, SEARCH_LIMIT_SETTING } from '../lib/web-search-tool.js';
+
 export const settingsRouter = Router();
+
+const searchLimitSchema = z.object({ limit: z.number().int().min(1).max(MAX_SEARCHES_CEILING) }).strict();
+
+settingsRouter.get('/search-limit', (_req, res) => {
+  res.json({ limit: getDefaultSearchLimit(), maximum: MAX_SEARCHES_CEILING });
+});
+
+settingsRouter.put('/search-limit', (req, res) => {
+  const parsed = searchLimitSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: { message: 'Invalid search limit', type: 'invalid_request_error' } });
+    return;
+  }
+  setSetting(SEARCH_LIMIT_SETTING, String(parsed.data.limit));
+  res.json({ limit: parsed.data.limit, maximum: MAX_SEARCHES_CEILING });
+});
 
 // Which RELEASE this install is, for the dashboard's version row (#703).
 // Deliberately NOT /api/version: the Ollama emulation already owns that path

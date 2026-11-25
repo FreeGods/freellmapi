@@ -1,3 +1,4 @@
+import { getSetting } from '../db/index.js';
 import crypto from 'crypto';
 import type { Request, Response } from 'express';
 import { runSearch, SearchError, searchAvailable } from '../services/search.js';
@@ -30,6 +31,7 @@ export const WEB_SEARCH_FUNCTION_PARAMETERS = {
 } as const;
 
 /** Default and ceiling for searches per request when the client sets none. */
+export const SEARCH_LIMIT_SETTING = 'default_max_searches';
 export const DEFAULT_MAX_SEARCHES = 5;
 export const MAX_SEARCHES_CEILING = 20;
 const RESULTS_PER_SEARCH = 5;
@@ -260,7 +262,13 @@ export function copyCapturedHeaders(captured: CapturedResponse, res: Response): 
 }
 
 /** Clamp a client-supplied max_uses. */
+export function getDefaultSearchLimit(): number {
+  const saved = Number(getSetting(SEARCH_LIMIT_SETTING));
+  return Number.isInteger(saved) && saved >= 1 && saved <= MAX_SEARCHES_CEILING
+    ? saved : DEFAULT_MAX_SEARCHES;
+}
+
 export function resolveMaxSearches(raw: unknown): number {
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) return DEFAULT_MAX_SEARCHES;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) return getDefaultSearchLimit();
   return Math.min(Math.floor(raw), MAX_SEARCHES_CEILING);
 }
