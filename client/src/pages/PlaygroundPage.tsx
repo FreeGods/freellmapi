@@ -1,3 +1,5 @@
+import { prepareTurn } from '@/lib/playground-turn'
+import { FailureActions } from '@/components/playground/failure-actions'
 import { deepResearch } from '@/lib/deep-research'
 import { useState, useRef, useEffect, useMemo, useCallback, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -672,11 +674,12 @@ export default function PlaygroundPage() {
   // Read a fusion SSE stream, updating the assistant message in place as panel
   // answers + the judge arrive (additive `_fusion` frames) and the final answer
   // streams as content deltas.
-  const streamFusion = async (stream: ReadableStream<Uint8Array>, baseMessages: ChatMessage[], start: number, webSearch?: WebSearchMeta) => {
+  const streamFusion = async (stream: ReadableStream<Uint8Array>, baseMessages: ChatMessage[], start: number, diagnostic: ChatMessage['diagnostic'], webSearch?: WebSearchMeta) => {
     const reader = stream.getReader()
     const dec = new TextDecoder()
     let buf = ''
     let finalContent = ''
+    let failure: string | undefined
     const panel: FusionPanelEntry[] = []
     let judge: { platform: string; model: string } | null = null
 
@@ -685,7 +688,8 @@ export default function PlaygroundPage() {
     const flush = (streaming: boolean): ChatMessage[] => {
       const next: ChatMessage[] = [...baseMessages, {
         role: 'assistant',
-        content: finalContent,
+        content: failure ?? finalContent,
+        ...(failure !== undefined ? { isError: true, diagnostic } : {}),
         meta: { latency: Date.now() - start, fusionPanel: [...panel], fusionJudge: judge, fusionStreaming: streaming, webSearch },
       }]
       setMessages(next)
@@ -714,7 +718,7 @@ export default function PlaygroundPage() {
           }
           flush(true)
         } else if (obj.error) {
-          finalContent = `${t('playground.errorPrefix')} ${obj.error.message}`
+          failure = obj.error.message ?? t('common.unknownError')
           flush(true)
         } else if (obj.choices) {
           const delta = obj.choices[0]?.delta?.content
@@ -737,6 +741,7 @@ export default function PlaygroundPage() {
     start: number,
     routedVia: string | null,
     fallbackAttempts: string | null,
+    diagnostic: ChatMessage['diagnostic'],
     webSearchMeta?: WebSearchMeta,
   ) => {
     const via = routedVia
@@ -767,7 +772,7 @@ export default function PlaygroundPage() {
           },
         })
       }
-      if (failure !== null) next.push({ role: 'assistant', isError: true, content: failure })
+      if (failure !== null) next.push({ role: 'assistant', isError: true, content: failure, diagnostic })
       setMessages(next)
       return next
     }
@@ -827,24 +832,30 @@ export default function PlaygroundPage() {
 
   const removeAttachment = (id: string) => setAttachments(prev => prev.filter(a => a.id !== id))
 
-  const handleSend = async () => {
+  const handleSend = async (retryIndex?: number) => {
+    const retry = retryIndex === undefined ? undefined : messages[retryIndex]
     const text = input.trim()
-    if ((!text && attachments.length === 0) || loading) return
+    if ((!retry && !text && attachments.length === 0) || loading) return
 
     // Text-like files are inlined into the prompt; images ride along as data
     // URIs and become `image_url` parts in the request envelope below.
-    const userMsg: ChatMessage = {
+    const userMsg: ChatMessage = retry ?? {
       role: 'user',
       content: composeText(text, attachments),
       ...(pendingImages.length > 0 ? { images: pendingImages } : {}),
     }
-    const newMessages = [...messages, userMsg]
+    const { history, promptMessages, newMessages } = prepareTurn(messages, userMsg, retryIndex)
+    const diagnostic: NonNullable<ChatMessage['diagnostic']> = {
+      timestamp: new Date().toISOString(), requestedModel: selectedModel,
+    }
     // Your own message always brings the transcript back down, however far up
     // you had scrolled to read.
     followRef.current = true
     setMessages(newMessages)
-    setInput('')
-    setAttachments([])
+    if (!retry) {
+      setInput('')
+      setAttachments([])
+    }
     setLoading(true)
     inputRef.current?.focus()
 
@@ -873,7 +884,7 @@ export default function PlaygroundPage() {
         const research = await deepResearch({
           base, headers, signal: controller.signal, model: selectedModel,
           objective: userMsg.content,
-          history: messages.slice(-6).map(m => m.role + ': ' + m.content).join('\n').slice(-6000),
+          history: history.slice(-6).map(m => m.role + ': ' + m.content).join('\n').slice(-6000),
           limit: searchBudget, progress: setResearchRound,
         })
         searchContext = research.context
@@ -882,14 +893,14 @@ export default function PlaygroundPage() {
           latency: Date.now() - start, sources: research.sources,
         }
         setResearchRound(null)
-      } else if (webSearchOn && text) {
+      } else if (webSearchOn && (retry ? retry.content : text)) {
         const searchStart = Date.now()
         try {
           const res = await fetch(`${base}/v1/search`, {
             method: 'POST',
             headers,
             signal: controller.signal,
-            body: JSON.stringify({ query: text, max_results: 5 }),
+            body: JSON.stringify({ query: retry ? retry.content : text, max_results: 5 }),
           })
           if (!res.ok) {
             const err = await res.json().catch(() => ({ error: { message: `HTTP ${res.status}` } }))
@@ -916,7 +927,7 @@ export default function PlaygroundPage() {
         messages: [
           ...(sysPrompt ? [{ role: 'system', content: sysPrompt }] : []),
           ...(searchContext ? [{ role: 'system', content: searchContext }] : []),
-          ...newMessages.map(m => ({ role: m.role, content: toMessageContent(m.content, m.images) })),
+          ...promptMessages.map(m => ({ role: m.role, content: toMessageContent(m.content, m.images) })),
         ],
         // Only the knobs switched on in the settings rail: temperature, top_p
         // and max_tokens, spelled as /v1/chat/completions parses them. An
@@ -941,13 +952,16 @@ export default function PlaygroundPage() {
       const routedVia = res.headers.get('X-Routed-Via')
       const fallbackAttempts = res.headers.get('X-Fallback-Attempts')
 
+      diagnostic.httpStatus = res.status
+      if (routedVia) diagnostic.route = routedVia
+      if (fallbackAttempts) diagnostic.fallbackAttempts = Number(fallbackAttempts)
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: { message: `HTTP ${res.status}` } }))
         // A refused request still ends an exchange, and the question that
         // provoked it is worth keeping — save the error bubble along with it.
         const failed: ChatMessage[] = [...newMessages, {
           role: 'assistant',
-          isError: true,
+          isError: true, diagnostic,
           content: err.error?.message ?? t('common.unknownError'),
         }]
         setMessages(failed)
@@ -956,7 +970,7 @@ export default function PlaygroundPage() {
       }
 
       if (isFusion && res.body) {
-        await streamFusion(res.body, newMessages, start, webSearchMeta)
+        await streamFusion(res.body, newMessages, start, diagnostic, webSearchMeta)
         return
       }
 
@@ -965,7 +979,7 @@ export default function PlaygroundPage() {
       // fall back to the buffered path rather than trusting that: a proxy in
       // front of us, or a future non-streaming route, can still hand back JSON.
       if (!isFusion && res.body && (res.headers.get('Content-Type') ?? '').includes('text/event-stream')) {
-        await streamChat(res.body, newMessages, start, routedVia, fallbackAttempts, webSearchMeta)
+        await streamChat(res.body, newMessages, start, routedVia, fallbackAttempts, diagnostic, webSearchMeta)
         return
       }
 
@@ -1005,7 +1019,7 @@ export default function PlaygroundPage() {
       if (err?.name === 'AbortError') return
       const failed: ChatMessage[] = [...newMessages, {
         role: 'assistant',
-        isError: true,
+        isError: true, diagnostic,
         content: err.message,
       }]
       setMessages(failed)
@@ -1109,6 +1123,7 @@ export default function PlaygroundPage() {
           ) : (
             <>
               {messages.map((msg, i) => {
+                const questionIndex = msg.isError ? messages.slice(0, i).map(m => m.role).lastIndexOf('user') : -1
                 const fusionPanel = msg.meta?.fusionPanel
                 const okPanel = fusionPanel?.filter(p => p.status !== 'failed') ?? []
                 // Skip an empty assistant bubble while the fusion trace is still
@@ -1145,6 +1160,8 @@ export default function PlaygroundPage() {
                               <div className="min-w-0">
                                 <p className="font-medium">{t('playground.errorTitle')}</p>
                                 <p className="whitespace-pre-wrap break-words">{msg.content}</p>
+                                <FailureActions message={msg} question={messages[questionIndex]?.content}
+                                  disabled={loading || questionIndex < 0} onRetry={() => handleSend(questionIndex)} />
                               </div>
                             </div>
                           ) : msg.role === 'assistant' ? (
@@ -1337,7 +1354,7 @@ export default function PlaygroundPage() {
             placeholder={t('playground.inputPlaceholder')}
             hasContent={composerHasContent(input, attachments.length)}
             loading={loading}
-            onSend={handleSend}
+            onSend={() => handleSend()}
             onAttach={() => fileInputRef.current?.click()}
             labels={{ add: t('playground.addMenu'), attach: t('playground.attach'), send: t('playground.send'), sending: t('playground.sending') }}
             dictation={{

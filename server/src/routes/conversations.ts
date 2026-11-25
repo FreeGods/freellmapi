@@ -52,6 +52,10 @@ const messageSchema = z.object({
   role: z.enum(['user', 'assistant']),
   content: z.string(),
   images: z.array(z.string()).optional(),
+  diagnostic: z.object({
+    timestamp: z.string(), requestedModel: z.string(), httpStatus: z.number().int().optional(),
+    route: z.string().optional(), fallbackAttempts: z.number().int().optional(),
+  }).optional(),
   isError: z.boolean().optional(),
   reasoning: z.string().optional(),
   meta: metaSchema.optional(),

@@ -32,6 +32,7 @@ export interface ChatMessage {
   images?: string[]
   // Request-level failure rendered as a distinct error bubble, not a fake
   // assistant reply.
+  diagnostic?: { timestamp: string; requestedModel: string; httpStatus?: number; route?: string; fallbackAttempts?: number }
   isError?: boolean
   // Thinking tokens (`delta.reasoning_content`) accumulated separately from the
   // answer, shown as a collapsible aside above it.
